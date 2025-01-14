@@ -1,0 +1,3 @@
+https://github.com/notAI-tech/NudeNet
+
+https://github.com/notAI-tech/NudeNet/releases/download/v3.4-weights/640m.onnx

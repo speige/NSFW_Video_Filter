@@ -1,0 +1,4 @@
+https://github.com/GantMan/nsfw_model
+
+https://s3.amazonaws.com/ir_public/ai/nsfw_models/nsfw.299x299.pb
+https://github.com/GantMan/nsfw_model/releases/download/1.2.0/mobilenet_v2_140_224.1.zip

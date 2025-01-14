@@ -1,0 +1,2 @@
+https://github.com/bumble-tech/private-detector
+https://storage.googleapis.com/private_detector/private_detector_with_frozen.zip
