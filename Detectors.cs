@@ -1,4 +1,5 @@
 ﻿using Emgu.CV.Dnn;
+using Microsoft.ML.OnnxRuntime.Tensors;
 using SixLabors.ImageSharp;
 using SixLabors.ImageSharp.PixelFormats;
 using Rectangle = System.Drawing.Rectangle;
@@ -50,7 +51,7 @@ namespace NSFW_Video_Filter
         }
     }
 
-    public class BumbleDetector : OnnxDetector
+    public class BumbleDetector : BaseDetector
     {
         public BumbleDetector()
             : base(Path.Combine(Path.GetDirectoryName(Environment.ProcessPath), @"Models\Bumble\bumble.onnx"), "x:0", "Identity:0", 480, 480)
@@ -59,13 +60,14 @@ namespace NSFW_Video_Filter
             _shape = new int[] { 1, _resizeHeight * _resizeWidth * 3 };
         }
 
-        protected override float ModelOutputToProbability(PreprocessedImage preprocessed, float[] modelOutput)
+        protected override float ModelOutputToProbability(PreprocessedImage preprocessed, TensorBase modelOutput)
         {
-            return modelOutput[0];
+            var result = (DenseTensor<float>)modelOutput;
+            return result[0];
         }
     }
 
-    public class MobileNetV2Detector : OnnxDetector
+    public class MobileNetV2Detector : BaseDetector
     {
         public MobileNetV2Detector()
             : base(Path.Combine(Path.GetDirectoryName(Environment.ProcessPath), @"Models\GantMan\MobileNet_v2\MobileNetV2.onnx"), "self:0", "sequential/prediction/Softmax:0", 224, 224)
@@ -74,14 +76,15 @@ namespace NSFW_Video_Filter
             _padToMaintainAspectRatio = false;
         }
 
-        protected override float ModelOutputToProbability(PreprocessedImage preprocessed, float[] modelOutput)
+        protected override float ModelOutputToProbability(PreprocessedImage preprocessed, TensorBase modelOutput)
         {
             //var labels = new string[] { "Drawing", "Hentai", "Neutral", "Porn", "Sexy" }; 
-            return modelOutput[1] + modelOutput[3] + modelOutput[4];
+            var result = (DenseTensor<float>)modelOutput;
+            return result.Buffer.Span[1] + result.Buffer.Span[3] + result.Buffer.Span[4];
         }
     }
 
-    public class InceptionV3Detector : OnnxDetector
+    public class InceptionV3Detector : BaseDetector
     {
         public InceptionV3Detector()
             : base(Path.Combine(Path.GetDirectoryName(Environment.ProcessPath), @"Models\GantMan\Inception_V3\nsfw.299x299.onnx"), "input_1:0", "dense_3/Softmax:0", 299, 299)
@@ -90,14 +93,15 @@ namespace NSFW_Video_Filter
             _padToMaintainAspectRatio = false;
         }
 
-        protected override float ModelOutputToProbability(PreprocessedImage preprocessed, float[] modelOutput)
+        protected override float ModelOutputToProbability(PreprocessedImage preprocessed, TensorBase modelOutput)
         {
             //var labels = new string[] { "Drawing", "Hentai", "Neutral", "Porn", "Sexy" }; 
-            return modelOutput[1] + modelOutput[3] + modelOutput[4];
+            var result = (DenseTensor<float>)modelOutput;
+            return result.Buffer.Span[1] + result.Buffer.Span[3] + result.Buffer.Span[4];
         }
     }
 
-    public class NudeNetDetector : OnnxDetector
+    public class NudeNetDetector : BaseDetector
     {
         public NudeNetDetector()
             : base(Path.Combine(Path.GetDirectoryName(Environment.ProcessPath), @"Models\NudeNet\640m.onnx"), "images", "output0", 640, 640)
@@ -115,41 +119,29 @@ namespace NSFW_Video_Filter
 
         protected readonly string[] _labels = new string[] { "FEMALE_GENITALIA_COVERED", "FACE_FEMALE", "BUTTOCKS_EXPOSED", "FEMALE_BREAST_EXPOSED", "FEMALE_GENITALIA_EXPOSED", "MALE_BREAST_EXPOSED", "ANUS_EXPOSED", "FEET_EXPOSED", "BELLY_COVERED", "FEET_COVERED", "ARMPITS_COVERED", "ARMPITS_EXPOSED", "FACE_MALE", "BELLY_EXPOSED", "MALE_GENITALIA_EXPOSED", "ANUS_COVERED", "FEMALE_BREAST_COVERED", "BUTTOCKS_COVERED" };
 
-        protected override float ModelOutputToProbability(PreprocessedImage preprocessed, float[] modelOutput)
+        protected override float ModelOutputToProbability(PreprocessedImage preprocessed, TensorBase modelOutput)
         {
-            //todo: fix this. modelOuput array length doesn't match what's expected
+            //var result = PostProcess_Internal(preprocessed, (DenseTensor<float>)modelOutput);
             return 0;
-            /*
-            var result = PostProcess_Internal(modelOutput, preprocessed.XPadding, preprocessed.YPadding, preprocessed.RatioX, preprocessed.RatioY, preprocessed.OriginalWidth, preprocessed.OriginalHeight, _resizeWidth, _resizeHeight);
-            return new float[0];
-            */
         }
 
-        protected List<Detection> PostProcess_Internal(
-               float[,,] output,
-               int xPad,
-               int yPad,
-               float xRatio,
-               float yRatio,
-               int imageOriginalWidth,
-               int imageOriginalHeight,
-               int modelWidth,
-               int modelHeight)
+        protected List<Detection> PostProcess_Internal(PreprocessedImage preprocessed, DenseTensor<float> output)
         {
-            // Squeeze the output and transpose
-            // Assuming output shape is [1, rows, cols], transpose to [cols, rows]
-            int rows = output.GetLength(1);
-            int cols = output.GetLength(2);
+            if (output.Dimensions.Length != 3 || output.Dimensions[0] != 1)
+            {
+                throw new ArgumentException("Output tensor must have shape [1, rows, cols]");
+            }
 
-            // Convert the 3D output array to a 2D list for easier processing
-            List<float[]> outputs = new List<float[]>();
+            int rows = output.Dimensions[1];
+            int cols = output.Dimensions[2];
+
+            Span<float> buffer = output.Buffer.ToArray().AsSpan();
+
+            List<float[]> outputs = new List<float[]>(rows);
             for (int i = 0; i < rows; i++)
             {
-                float[] row = new float[cols];
-                for (int j = 0; j < cols; j++)
-                {
-                    row[j] = output[0, i, j];
-                }
+                int offset = i * cols;
+                float[] row = buffer.Slice(offset, cols).ToArray();
                 outputs.Add(row);
             }
 
@@ -165,26 +157,24 @@ namespace NSFW_Video_Filter
                 if (maxScore >= 0.2f)
                 {
                     int classId = Array.IndexOf(classesScores, maxScore);
+
                     float x = outputs[i][0];
                     float y = outputs[i][1];
                     float w = outputs[i][2];
                     float h = outputs[i][3];
 
-                    // Convert from center coordinates to top-left corner coordinates
                     x -= w / 2;
                     y -= h / 2;
 
-                    // Scale coordinates to original image size
-                    x *= (imageOriginalWidth + xPad) / (float)modelWidth;
-                    y *= (imageOriginalHeight + yPad) / (float)modelHeight;
-                    w *= (imageOriginalWidth + xPad) / (float)modelWidth;
-                    h *= (imageOriginalHeight + yPad) / (float)modelHeight;
+                    x *= (preprocessed.OriginalWidth + preprocessed.XPadding) / (float)preprocessed.Image.Width;
+                    y *= (preprocessed.OriginalHeight + preprocessed.YPadding) / (float)preprocessed.Image.Height;
+                    w *= (preprocessed.OriginalWidth + preprocessed.XPadding) / (float)preprocessed.Image.Width;
+                    h *= (preprocessed.OriginalHeight + preprocessed.YPadding) / (float)preprocessed.Image.Height;
 
-                    // Clip coordinates to image boundaries
-                    x = Math.Max(0, Math.Min(x, imageOriginalWidth));
-                    y = Math.Max(0, Math.Min(y, imageOriginalHeight));
-                    w = Math.Min(w, imageOriginalWidth - x);
-                    h = Math.Min(h, imageOriginalHeight - y);
+                    x = Math.Max(0, Math.Min(x, preprocessed.OriginalWidth));
+                    y = Math.Max(0, Math.Min(y, preprocessed.OriginalHeight));
+                    w = Math.Min(w, preprocessed.OriginalWidth - x);
+                    h = Math.Min(h, preprocessed.OriginalHeight - y);
 
                     classIds.Add(classId);
                     scores.Add(maxScore);
@@ -192,7 +182,6 @@ namespace NSFW_Video_Filter
                 }
             }
 
-            // Perform Non-Max Suppression
             var indices = DnnInvoke.NMSBoxes(
                 boxes.Select(b => new Rectangle(b.X, b.Y, b.Width, b.Height)).ToArray(),
                 scores.ToArray(),

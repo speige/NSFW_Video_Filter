@@ -1,22 +1,57 @@
-﻿using SixLabors.ImageSharp;
+﻿using Microsoft.ML.OnnxRuntime;
+using Microsoft.ML.OnnxRuntime.Tensors;
 using SixLabors.ImageSharp.PixelFormats;
+using SixLabors.ImageSharp;
 using SixLabors.ImageSharp.Processing;
 
 namespace NSFW_Video_Filter
 {
-    public abstract class BaseDetector : IDisposable
+    public abstract class BaseDetector
     {
+        protected InferenceSession _session;
+        protected readonly string _inputTensorName;
+        protected readonly string _outputTensorName;
         protected readonly int _resizeWidth;
         protected readonly int _resizeHeight;
-        protected Func<float, float> _pixelTransformer { get;  init; }
+        protected Func<float, float> _pixelTransformer { get; init; }
         protected int[] _shape;
         protected bool _padToMaintainAspectRatio = true;
 
-        public BaseDetector(int resizeWidth, int resizeHeight)
+
+        public BaseDetector(string modelPath, string inputTensorName, string outputTensorName, int resizeWidth, int resizeHeight)
         {
+            _inputTensorName = inputTensorName;
+            _outputTensorName = outputTensorName;
             _resizeWidth = resizeWidth;
             _resizeHeight = resizeHeight;
+
             _shape = new int[] { 1, _resizeHeight, _resizeWidth, 3 };
+
+            var sessionOptions = new SessionOptions()
+            {
+                GraphOptimizationLevel = GraphOptimizationLevel.ORT_ENABLE_ALL,
+                //LogSeverityLevel = OrtLoggingLevel.ORT_LOGGING_LEVEL_VERBOSE
+            };
+            for (var deviceId = 0; deviceId <= 2; deviceId++)
+            {
+                try
+                {
+                    sessionOptions.AppendExecutionProvider_DML(deviceId);
+                    break;
+                }
+                catch (Exception e)
+                {
+                    if (e.Message.Contains("handle is invalid", StringComparison.InvariantCultureIgnoreCase))
+                    {
+                        break;
+                    }
+
+                    Console.WriteLine("Unable to use GPU Acceleration: " + e.Message);
+                }
+            }
+            sessionOptions.AppendExecutionProvider_CPU();
+
+            _session = new InferenceSession(ReadFileChunked(modelPath), sessionOptions);
         }
 
         public static byte[] ReadFileChunked(string modelPath)
@@ -115,8 +150,31 @@ namespace NSFW_Video_Filter
             return pixelData;
         }
 
-        protected abstract float ModelOutputToProbability(PreprocessedImage preprocessed, float[] modelOutput);
-        protected abstract float[] RunModel(PreprocessedImage image);
+        protected virtual Tensor<float> ImageToTensor(PreprocessedImage image)
+        {
+            return new DenseTensor<float>(image.PixelData, _shape);
+        }
+
+        protected TensorBase RunModel<T>(Tensor<T> input, string inputTensorName, string outputTensorName)
+        {
+            var inputs = new List<NamedOnnxValue> { NamedOnnxValue.CreateFromTensor(inputTensorName, input) };
+
+            using (var results = _session.Run(inputs))
+            {
+                var output = results.FirstOrDefault(r => r.Name == outputTensorName);
+                return output?.Value as TensorBase;
+            }
+        }
+
+        protected virtual TensorBase RunModel(PreprocessedImage image)
+        {
+            return RunModel(ImageToTensor(image), _inputTensorName, _outputTensorName);
+        }
+
+        public void Dispose()
+        {
+            _session.Dispose();
+        }
 
         public virtual float CalcNSFWProbability(byte[] imageBytes)
         {
@@ -127,6 +185,8 @@ namespace NSFW_Video_Filter
             }
         }
 
+        protected abstract float ModelOutputToProbability(PreprocessedImage preprocessed, TensorBase modelOutput);
+
         public virtual float CalcNSFWProbability(Image<Rgba32> image)
         {
             using (var preprocessed = PreprocessImage(image))
@@ -135,7 +195,5 @@ namespace NSFW_Video_Filter
                 return (float)Math.Round(ModelOutputToProbability(preprocessed, output), 2);
             }
         }
-
-        public abstract void Dispose();
     }
 }
